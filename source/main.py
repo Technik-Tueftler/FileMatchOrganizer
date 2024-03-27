@@ -8,6 +8,7 @@ import re
 import shutil
 from datetime import datetime
 from dataclasses import dataclass, field
+import time
 from typing import List
 import tkinter as tk
 from tkinter import PhotoImage, filedialog, messagebox
@@ -16,6 +17,9 @@ from PIL import Image
 from pdfquery import PDFQuery
 from pdf2image import convert_from_path
 import pytesseract
+from tqdm import tqdm
+import db
+
 from constants import (
     APP_INFORMATION,
     INITIAL_DIRECTORY,
@@ -44,6 +48,15 @@ if platform.system() == "Windows":
     out_directory = Path(r"~\Desktop").expanduser()
 else:
     out_directory = Path("~").expanduser()
+
+
+@dataclass
+class PdfFile:
+    """Class of a pdf file for further processing during indexing"""
+
+    path: str
+    directory: str
+    name: str
 
 
 @dataclass
@@ -110,6 +123,9 @@ class FileOrganizerApp:
             self.root, text="Organisieren", command=self.organize_files
         )
         self.organize_button.pack(pady=10)
+
+        self.index_button = tk.Button(self.root, text="Indexierung", command=self.index)
+        self.index_button.pack(pady=10)
 
         self.finish_button = tk.Button(
             self.root, text="Beenden", command=self.finish_app
@@ -214,6 +230,42 @@ class FileOrganizerApp:
                     move_file(start_element, match_pattern)
                     break
         write_info(f"{datetime.now()}: Finishing pattern matching and file moving")
+
+    def index(self):
+        if settings.folder_target_path is None:
+            messagebox.showwarning("WARNING", "Please select the target path")
+            return
+        write_info(f"{datetime.now()}: Start Indexing")
+        pdf_files = []
+        for root_path, directory, files in os.walk(settings.folder_target_path):
+            for name in files:
+                if name.endswith(".pdf"):
+                    pdf_files.append(
+                        PdfFile(path=root_path, directory=directory, name=name)
+                    )
+        for pdf_file in tqdm(pdf_files):
+            with TemporaryDirectory() as tempdir:
+                file_path = Path(os.path.join(pdf_file.path, pdf_file.name))
+                images = converting_pdf_to_images(tempdir, file_path)
+                text = recognizing_text(images)
+                all_matches = [re.findall(pattern, s) for s in text]
+                matches_flat = [element for list in all_matches for element in list]
+                if matches_flat:
+                    for match in matches_flat:
+                        recorded = (
+                            db.session.query(db.Match).filter_by(pattern=match).first()
+                        )
+                        if recorded is not None:
+                            continue
+                        db.session.add(
+                            db.Match(
+                                pattern=match,
+                                root_path="NA",
+                                match_path=pdf_file.path,
+                                match_file=pdf_file.name,
+                            )
+                        )
+                db.session.commit()
 
     def search_match(
         self, str_pattern: str, objects: List[AnalyzedFile]
